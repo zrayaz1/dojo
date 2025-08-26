@@ -10,7 +10,6 @@ from CTFd.utils.user import get_current_user
 from CTFd.models import db
 
 logger = logging.getLogger("dojo.query_timer")
-logger.setLevel(logging.INFO)
 
 thread_local = threading.local()
 
@@ -50,8 +49,13 @@ def after_cursor_execute(conn, cursor, statement, parameters, context, executema
 
     traceback_str = " ".join(reversed(dojo_frames)) if dojo_frames else "no_dojo_frames"
 
+    try:
+        user = get_current_user()
+    except RuntimeError: # if not in an app context
+        user = None
+
     logger.warning(
-        f"Slow query: {query_time=:.3f}s user={get_current_user()} {traceback_str=}"
+        f"Slow query: {query_time=:.3f}s user={user} {traceback_str=}"
     )
 
 def query_timeout(stmt, ms, default):

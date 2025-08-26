@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 EOF
 
 RUN <<EOF
-curl -fsSL https://get.docker.com | VERSION=28.3.3 sh
+curl -fsSL https://get.docker.com | VERSION=27.5.1 sh
 sed -i 's|-H fd:// ||' /lib/systemd/system/docker.service
 EOF
 
@@ -68,6 +68,8 @@ EOF
 
 WORKDIR /opt/pwn.college
 COPY . .
+
+RUN find /opt/pwn.college/ctfd/patches -exec patch -d /opt/CTFd -p1 -N -i {} \;
 
 RUN <<EOF
 find /opt/pwn.college/etc/systemd/system -type f -exec ln -s {} /etc/systemd/system/ \;
