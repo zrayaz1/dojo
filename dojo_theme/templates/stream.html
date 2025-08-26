@@ -1,15 +1,179 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="jumbotron">
+<div class="jumbotron bg-dark text-light border-secondary">
   <div class="container">
-    <h1 class="brand-mono">Stream</h1>
+    <h1 class="brand-mono text-light">DOJO Stream</h1>
+    <p class="lead text-light">Stream your screen and microphone directly to Twitch</p>
   </div>
 </div>
+
 <div class="container">
-  <p>
-    Gimme your stream key.
-  </p>
+  <div class="row">
+    <div class="col-md-8">
+      <!-- Stream Preview -->
+      <div class="card mb-4 bg-dark text-light border-secondary">
+        <div class="card-header bg-dark border-secondary">
+          <h5 class="mb-0 text-light">Stream Preview</h5>
+        </div>
+        <div class="card-body bg-dark text-light">
+          <div id="preview-container" class="text-center">
+            <video id="preview-video" autoplay muted playsinline style="max-width: 100%; height: auto; border: 1px solid #6c757d; border-radius: 4px;"></video>
+            <div id="no-preview" class="text-muted">
+              <i class="fas fa-video fa-3x mb-3"></i>
+              <p>No stream preview available</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stream Controls -->
+      <div class="card mb-4 bg-dark text-light border-secondary">
+        <div class="card-header bg-dark border-secondary">
+          <h5 class="mb-0 text-light">Stream Controls</h5>
+        </div>
+        <div class="card-body bg-dark text-light">
+          <div class="row">
+            <div class="col-md-6">
+              <button id="start-stream-btn" class="btn btn-success btn-lg btn-block mb-3">
+                <i class="fas fa-play"></i> Start Stream
+              </button>
+              <button id="stop-stream-btn" class="btn btn-danger btn-lg btn-block mb-3" style="display: none;">
+                <i class="fas fa-stop"></i> Stop Stream
+              </button>
+            </div>
+            <div class="col-md-6">
+              <button id="capture-tab-btn" class="btn btn-primary btn-lg btn-block mb-3">
+                <i class="fas fa-desktop"></i> Capture Screen
+              </button>
+              <button id="capture-audio-btn" class="btn btn-info btn-lg btn-block mb-3">
+                <i class="fas fa-microphone"></i> Capture Audio
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-md-4">
+      <!-- Stream Settings -->
+      <div class="card mb-4 bg-dark text-light border-secondary">
+        <div class="card-header bg-dark border-secondary">
+          <h5 class="mb-0 text-light">Stream Settings</h5>
+        </div>
+        <div class="card-body bg-dark text-light">
+          <div class="form-group">
+            <label for="twitch-key" class="text-light">Twitch Stream Key</label>
+            <input type="password" class="form-control bg-dark text-light border-secondary" id="twitch-key" placeholder="Enter your Twitch stream key">
+            <small class="form-text text-muted">
+              <a href="https://www.twitch.tv/broadcast/streamkey" target="_blank">Get your stream key</a>
+            </small>
+          </div>
+          
+          <div class="form-group">
+            <label for="stream-quality" class="text-light">Quality</label>
+            <select class="form-control bg-dark text-light border-secondary" id="stream-quality">
+              <option value="480p">480p (Low)</option>
+              <option value="720p" selected>720p (Medium)</option>
+              <option value="1080p">1080p (High)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="frame-rate" class="text-light">Frame Rate</label>
+            <select class="form-control bg-dark text-light border-secondary" id="frame-rate">
+              <option value="30" selected>30 FPS</option>
+              <option value="60">60 FPS</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="bitrate" class="text-light">Bitrate (kbps)</label>
+            <input type="number" class="form-control bg-dark text-light border-secondary" id="bitrate" value="2500" min="1000" max="8000">
+          </div>
+        </div>
+      </div>
+
+      <!-- Stream Status -->
+      <div class="card mb-4 bg-dark text-light border-secondary">
+        <div class="card-header bg-dark border-secondary">
+          <h5 class="mb-0 text-light">Stream Status</h5>
+        </div>
+        <div class="card-body bg-dark text-light">
+          <div id="stream-status">
+            <div class="alert alert-info">
+              <i class="fas fa-info-circle"></i> Ready to stream
+            </div>
+          </div>
+          
+          <div id="stream-stats" style="display: none;">
+            <div class="row text-center">
+              <div class="col-6">
+                <div class="border border-secondary rounded p-2 bg-dark">
+                  <div class="h5 mb-0 text-light" id="fps-counter">0</div>
+                  <small class="text-muted">FPS</small>
+                </div>
+              </div>
+              <div class="col-6">
+                <div class="border border-secondary rounded p-2 bg-dark">
+                  <div class="h5 mb-0 text-light" id="bitrate-counter">0</div>
+                  <small class="text-muted">kbps</small>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Audio Levels -->
+      <div class="card mb-4 bg-dark text-light border-secondary">
+        <div class="card-header bg-dark border-secondary">
+          <h5 class="mb-0 text-light">Audio Levels</h5>
+        </div>
+        <div class="card-body bg-dark text-light">
+          <div class="form-group">
+            <label for="mic-volume" class="text-light">Microphone Volume</label>
+            <input type="range" class="form-control-range" id="mic-volume" min="0" max="100" value="100">
+            <small class="form-text text-muted">Adjust microphone input level</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
+
+
+
+<!-- Error Modal -->
+<div class="modal fade" id="errorModal" tabindex="-1" role="dialog">
+  <div class="modal-dialog" role="document">
+    <div class="modal-content bg-dark text-light border-secondary">
+      <div class="modal-header bg-dark border-secondary">
+        <h5 class="modal-title text-light">Streaming Error</h5>
+        <button type="button" class="close text-light" data-dismiss="modal">
+          <span>&times;</span>
+        </button>
+      </div>
+      <div class="modal-body bg-dark text-light">
+        <div id="error-message"></div>
+      </div>
+      <div class="modal-footer bg-dark border-secondary">
+        <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 
+{% block scripts %}
+<script>
+    // Pass streaming service configuration to JavaScript
+    window.STREAMING_CONFIG = {
+        host: window.location.hostname,
+        port: window.location.port || (window.location.protocol === 'https:' ? '443' : '80'),
+        path: '/streaming'
+    };
+</script>
+<script src="{{ url_for('views.themes', path='js/dojo/stream.js') }}"></script>
+{% endblock %}
