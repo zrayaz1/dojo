@@ -32,6 +32,7 @@ from .pages.discord import discord
 from .pages.course import course
 from .pages.belts import belts
 from .pages.research import research
+from .pages.stream import stream
 from .pages.feed import feed
 from .pages.index import static_html_override
 from .pages.test_error import test_error_pages
@@ -169,6 +170,7 @@ def load(app):
     app.register_blueprint(course)
     app.register_blueprint(belts)
     app.register_blueprint(research)
+    app.register_blueprint(stream)
     app.register_blueprint(feed)
     app.register_blueprint(test_error_pages)
     app.register_blueprint(api, url_prefix="/pwncollege_api/v1")
