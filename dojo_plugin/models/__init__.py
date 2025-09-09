@@ -190,7 +190,7 @@ class Dojos(db.Model):
             .where(Dojos.dojo_id == DojoChallenges.dojo_id)
             .where(DojoChallenges.required)
             .scalar_subquery(),
-            deferred=True) 
+            deferred=True)
 
     @property
     def solves_code(self):
@@ -249,7 +249,7 @@ class Dojos(db.Model):
 
     def completions(self):
         solves_subquery = (
-            self.solves(ignore_visibility=True, ignore_admins=False, required_only=True)
+            self.solves(ignore_visibility=True, ignore_admins=False)
             .with_entities(Solves.user_id,
                            db.func.count().label("solve_count"),
                            db.func.max(Solves.date).label("last_solve"))
@@ -272,16 +272,14 @@ class Dojos(db.Model):
         if "belt" in self.award:
             result = result.where(Awards.type == "belt", Awards.name == self.award["belt"])
         elif "emoji" in self.award:
-            result = result.where(Awards.type == "emoji", Awards.name == self.award["emoji"], Awards.category == self.hex_dojo_id)
+            result = result.where(Awards.type == "emoji", Awards.name != "STALE", Awards.category == self.hex_dojo_id)
 
         awards = result.order_by(Awards.date.desc()).all()
-        if "emoji" in self.award:
-            awards = [ a for a in awards if a.name == self.award["emoji"] ]
 
         return awards
 
     def completed(self, user):
-        return self.solves(user=user, ignore_visibility=True, ignore_admins=False, required_only=True).count() == len([challenge for challenge in self.challenges if challenge.required])
+        return self.solves(user=user, ignore_visibility=True, ignore_admins=False).count() == len([challenge for challenge in self.challenges if challenge.required])
 
     def is_admin(self, user=None):
         if user is None:
@@ -387,10 +385,14 @@ class DojoModules(db.Model):
             for field in ["id", "name", "description"]:
                 kwargs[field] = kwargs[field] if kwargs.get(field) is not None else getattr(default, field, None)
 
+        def set_module_import(challenge):
+            challenge.data["module_import"] = True
+            return challenge
+
         kwargs["challenges"] = (
             kwargs.pop("challenges", None) or
             ([DojoChallenges(
-                default=challenge,
+                default=set_module_import(challenge),
                 visibility=(DojoChallengeVisibilities(start=visibility.start) if visibility else None),
             ) for challenge in default.challenges] if default else [])
         )
@@ -532,12 +534,12 @@ class DojoChallenges(db.Model):
         "importable": True,
         "allow_privileged": True,
         "progression_locked": False,
-        "interfaces": {
-            "Terminal": 7681,
-            "Code": 8080,
-            "Desktop": 6080,
-            "SSH": "ssh",
-        },
+        "interfaces": [
+            dict(name="Terminal", port=7681),
+            dict(name="Code",     port=8080),
+            dict(name="Desktop",  port=6080),
+            dict(name="SSH"),
+        ],
     }
 
     dojo = db.relationship("Dojos",
@@ -570,6 +572,9 @@ class DojoChallenges(db.Model):
             # TODO: maybe we should track the entire import
             kwargs["data"]["image"] = default.data.get("image")
             kwargs["data"]["path_override"] = str(default.path)
+            # only update the unified_index for module and dojo imports, not challenge specific ones
+            if default.data.get("module_import", False):
+                kwargs["data"]["unified_index"] = default.data.get("unified_index")
 
         super().__init__(*args, **kwargs)
 
@@ -612,7 +617,7 @@ class DojoChallenges(db.Model):
         return result
 
     @hybrid_method
-    def solves(self, *, user=None, dojo=None, module=None, ignore_visibility=False, ignore_admins=True, required_only=False):
+    def solves(self, *, user=None, dojo=None, module=None, ignore_visibility=False, ignore_admins=True, required_only=True):
         result = (
             Solves.query
             .filter_by(type=Solves.__mapper__.polymorphic_identity)
