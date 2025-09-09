@@ -167,13 +167,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-    // Pass streaming service configuration to JavaScript
-    window.STREAMING_CONFIG = {
-        host: window.location.hostname,
-        port: window.location.port || (window.location.protocol === 'https:' ? '443' : '80'),
-        path: '/streaming'
-    };
-</script>
 <script src="{{ url_for('views.themes', path='js/dojo/stream.js') }}"></script>
 {% endblock %}
