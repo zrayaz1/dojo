@@ -24,6 +24,10 @@
 	var audioContext = null;
 	var micStreamCached = null;
 	var screenStreamCached = null;
+	var canvas = null;
+	var canvasCtx = null;
+	var drawTimer = null;
+	var canvasVideoEl = null;
 
 	function setStatus(html, type) {
 		statusContainer.innerHTML = '<div class="alert alert-' + (type || 'info') + '">' + html + '</div>';
@@ -70,6 +74,10 @@
 				video: { width: constraints.width, height: constraints.height, frameRate: constraints.frameRate },
 				audio: false
 			});
+			try {
+				var vtrack = screen.getVideoTracks && screen.getVideoTracks()[0];
+				if (vtrack && 'contentHint' in vtrack) vtrack.contentHint = 'motion';
+			} catch (_) {}
 			screenStreamCached = screen;
 			return screen;
 		} catch (e) {
@@ -101,6 +109,48 @@
 		if (screenStream) tracks = tracks.concat(screenStream.getVideoTracks());
 		if (micStream) tracks = tracks.concat(micStream.getAudioTracks());
 		return new MediaStream(tracks);
+	}
+
+	function ensureCanvas(width, height) {
+		if (!canvas) {
+			canvas = document.createElement('canvas');
+			canvasCtx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+		}
+		if (canvas.width !== width || canvas.height !== height) {
+			canvas.width = width;
+			canvas.height = height;
+		}
+		return canvas;
+	}
+
+	function buildConstantFpsVideoStream(srcStream) {
+		var constraints = getConstraints();
+		var track = srcStream && srcStream.getVideoTracks ? srcStream.getVideoTracks()[0] : null;
+		var s = (track && track.getSettings) ? track.getSettings() : {};
+		var sourceWidth = s.width || constraints.width;
+		var sourceHeight = s.height || constraints.height;
+		var width = sourceWidth;
+		var height = sourceHeight;
+		ensureCanvas(width, height);
+		if (!canvasVideoEl) {
+			canvasVideoEl = document.createElement('video');
+			canvasVideoEl.playsInline = true;
+			canvasVideoEl.muted = true;
+		}
+		canvasVideoEl.srcObject = srcStream;
+		try { canvasVideoEl.play().catch(function () {}); } catch (_) {}
+		if (drawTimer) { clearInterval(drawTimer); drawTimer = null; }
+		var fps = constraints.frameRate || 30;
+		var interval = Math.max(5, Math.floor(1000 / fps));
+		var cstream = (canvas.captureStream && canvas.captureStream(fps)) || (canvas.mozCaptureStream && canvas.mozCaptureStream(fps));
+		var ctrack = cstream && cstream.getVideoTracks ? cstream.getVideoTracks()[0] : null;
+		drawTimer = setInterval(function () {
+			try {
+				canvasCtx.drawImage(canvasVideoEl, 0, 0, width, height);
+				if (ctrack && typeof ctrack.requestFrame === 'function') { ctrack.requestFrame(); }
+			} catch (_) {}
+		}, interval);
+		return cstream || srcStream;
 	}
 
 	function getMimeType() {
@@ -193,6 +243,7 @@
 			}
 			var screen = screenStreamCached || (mediaStream && mediaStream.getVideoTracks().length ? mediaStream : null);
 			if (!screen) screen = await captureScreen();
+			var constantFpsVideo = buildConstantFpsVideoStream(screen);
 			var mic = null;
 			try {
 				if (captureAudioBtn.dataset.enabled !== '0') {
@@ -204,7 +255,7 @@
 			} catch (_) {
 				setStatus('<i class="fas fa-microphone-slash"></i> Proceeding without microphone', 'warning');
 			}
-			mediaStream = mixStreams(screen, mic);
+			mediaStream = mixStreams(constantFpsVideo, mic);
 			noPreview && (noPreview.style.display = 'none');
 			previewVideo.srcObject = mediaStream;
 			await connectSocket();
@@ -221,6 +272,7 @@
 	function stopStream() {
 		stopRecording();
 		stopMedia();
+		if (drawTimer) { try { clearInterval(drawTimer); } catch (_) {} drawTimer = null; }
 		stopStats();
 		startBtn.style.display = '';
 		stopBtn.style.display = 'none';
@@ -230,7 +282,8 @@
 	captureTabBtn.addEventListener('click', function () {
 		captureScreen().then(function (screen) {
 			if (mediaStream) stopMedia();
-			mediaStream = screen;
+			var constantFpsVideo = buildConstantFpsVideoStream(screen);
+			mediaStream = mixStreams(constantFpsVideo, null);
 			previewVideo.srcObject = mediaStream;
 			noPreview && (noPreview.style.display = 'none');
 		});

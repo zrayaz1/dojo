@@ -16,11 +16,15 @@ socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger
 
 TWITCH_URL = os.getenv("TWITCH_URL", "rtmp://lax.contribute.live-video.net/app/")
 TWITCH_STREAM_KEY = os.getenv("TWITCH_STREAM_KEY", "live_730458392_hziVKdS2Za41727VIAJdA4xRxg3Frl")
+TWITCH_VIDEO_KBPS = int(os.getenv("TWITCH_VIDEO_KBPS", "4500"))
+TWITCH_FPS = int(os.getenv("TWITCH_FPS", "30"))
 
 
-def get_twitch_settings(url: str):
+def get_twitch_settings(url: str, fps: int, video_kbps: int):
     if not url:
         return []
+    gop = max(2, fps * 2)
+    vbv = max(video_kbps * 2, video_kbps + 1)
     return [
         "-c:v",
         "libx264",
@@ -28,6 +32,18 @@ def get_twitch_settings(url: str):
         "veryfast",
         "-tune",
         "zerolatency",
+        "-profile:v",
+        "high",
+        "-x264-params",
+        f"keyint={gop}:min-keyint={gop}:scenecut=0:force-cfr=1:vbv-bufsize={vbv}:vbv-maxrate={video_kbps}",
+        "-b:v",
+        f"{video_kbps}k",
+        "-minrate",
+        f"{video_kbps}k",
+        "-maxrate",
+        f"{video_kbps}k",
+        "-pix_fmt",
+        "yuv420p",
         "-c:a",
         "aac",
         "-strict",
@@ -35,14 +51,16 @@ def get_twitch_settings(url: str):
         "-ar",
         "44100",
         "-b:a",
-        "64k",
+        "128k",
         "-y",
         "-use_wallclock_as_timestamps",
         "1",
-        "-async",
-        "1",
-        "-bufsize",
-        "1000",
+        "-fflags",
+        "+genpts",
+        "-vsync",
+        "cfr",
+        "-max_interleave_delta",
+        "0",
         "-f",
         "flv",
         url,
@@ -78,9 +96,13 @@ def handle_connect():
         "webm",
         "-i",
         "-",
+        "-thread_queue_size",
+        "512",
         "-v",
         "error",
-    ] + get_twitch_settings(destination)
+        "-r",
+        str(TWITCH_FPS),
+    ] + get_twitch_settings(destination, TWITCH_FPS, TWITCH_VIDEO_KBPS)
 
     try:
         proc = subprocess.Popen(
