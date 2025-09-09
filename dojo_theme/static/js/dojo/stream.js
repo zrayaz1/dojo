@@ -21,6 +21,9 @@
 	var bytesSentThisSecond = 0;
 	var fpsApprox = 0;
 	var statsInterval = null;
+	var audioContext = null;
+	var micStreamCached = null;
+	var screenStreamCached = null;
 
 	function setStatus(html, type) {
 		statusContainer.innerHTML = '<div class="alert alert-' + (type || 'info') + '">' + html + '</div>';
@@ -58,10 +61,16 @@
 	async function captureScreen() {
 		try {
 			var constraints = getConstraints();
-			var screen = await navigator.mediaDevices.getDisplayMedia({
+			var md = navigator.mediaDevices;
+			var getDisplay = md && md.getDisplayMedia ? function (opts) { return md.getDisplayMedia(opts); } : null;
+			if (!getDisplay && typeof navigator.getDisplayMedia === 'function') {
+				getDisplay = function (opts) { return navigator.getDisplayMedia(opts); };
+			}
+			var screen = await getDisplay({
 				video: { width: constraints.width, height: constraints.height, frameRate: constraints.frameRate },
 				audio: false
 			});
+			screenStreamCached = screen;
 			return screen;
 		} catch (e) {
 			setStatus('<i class="fas fa-exclamation-triangle"></i> Screen capture error: ' + e.message, 'danger');
@@ -71,7 +80,15 @@
 
 	async function captureMic() {
 		try {
+			if (!audioContext) {
+				var Ctx = window.AudioContext || window.webkitAudioContext;
+				if (Ctx) audioContext = new Ctx();
+			}
+			if (audioContext && audioContext.state === 'suspended') {
+				try { await audioContext.resume(); } catch (_) {}
+			}
 			var mic = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+			micStreamCached = mic;
 			return mic;
 		} catch (e) {
 			setStatus('<i class="fas fa-exclamation-triangle"></i> Microphone error: ' + e.message, 'danger');
@@ -94,12 +111,28 @@
 		return 'video/webm';
 	}
 
-	function connectSocket() {
+	function loadSocketIoIfNeeded() {
+		return new Promise(function (resolve) {
+			if (window.io) return resolve();
+			var script = document.createElement('script');
+			script.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
+			script.onload = function () { resolve(); };
+			script.onerror = function () { resolve(); };
+			document.head.appendChild(script);
+		});
+	}
+
+	async function connectSocket() {
 		if (socket) return socket;
-		var url = (window.STREAM_SOCKET_URL) || 'http://localhost:3100';
+		await loadSocketIoIfNeeded();
+		var url = 'http://localhost:3100';
 		/* eslint-disable no-undef */
-		socket = io(url, { transports: ['websocket'] });
+		socket = window.io ? window.io(url, { transports: ['websocket'] }) : null;
 		/* eslint-enable no-undef */
+		if (!socket) {
+			setStatus('<i class="fas fa-exclamation-circle"></i> Socket.IO client not available', 'danger');
+			return null;
+		}
 		socket.on('connect', function () {
 			setStatus('<i class="fas fa-signal"></i> Connected to streaming server', 'success');
 		});
@@ -151,13 +184,30 @@
 	async function startStream() {
 		try {
 			setStatus('<i class="fas fa-spinner fa-spin"></i> Preparing stream...', 'info');
-			var screen = await captureScreen();
+			if (!audioContext) {
+				var Ctx = window.AudioContext || window.webkitAudioContext;
+				if (Ctx) audioContext = new Ctx();
+			}
+			if (audioContext && audioContext.state === 'suspended') {
+				try { await audioContext.resume(); } catch (_) {}
+			}
+			var screen = screenStreamCached || (mediaStream && mediaStream.getVideoTracks().length ? mediaStream : null);
+			if (!screen) screen = await captureScreen();
 			var mic = null;
-			try { if (captureAudioBtn.dataset.enabled === '1') mic = await captureMic(); } catch (_) {}
+			try {
+				if (captureAudioBtn.dataset.enabled !== '0') {
+					mic = micStreamCached || await captureMic();
+					captureAudioBtn.dataset.enabled = '1';
+					captureAudioBtn.classList.add('btn-warning');
+					captureAudioBtn.classList.remove('btn-info');
+				}
+			} catch (_) {
+				setStatus('<i class="fas fa-microphone-slash"></i> Proceeding without microphone', 'warning');
+			}
 			mediaStream = mixStreams(screen, mic);
 			noPreview && (noPreview.style.display = 'none');
 			previewVideo.srcObject = mediaStream;
-			connectSocket();
+			await connectSocket();
 			startRecording(mediaStream);
 			startBtn.style.display = 'none';
 			stopBtn.style.display = '';
@@ -191,6 +241,14 @@
 		captureAudioBtn.dataset.enabled = enabled ? '0' : '1';
 		captureAudioBtn.classList.toggle('btn-info', enabled);
 		captureAudioBtn.classList.toggle('btn-warning', !enabled);
+		if (!enabled) {
+			var Ctx = window.AudioContext || window.webkitAudioContext;
+			if (!audioContext && Ctx) audioContext = new Ctx();
+			if (audioContext && audioContext.state === 'suspended') {
+				audioContext.resume().catch(function () {});
+			}
+			captureMic().catch(function () {});
+		}
 	});
 
 	startBtn.addEventListener('click', startStream);
