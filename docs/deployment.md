@@ -40,6 +40,17 @@ This will run the initial setup, including building the challenge docker image.
 By default, the dojo will initialize itself to listen on and serve from `localhost.pwn.college` and `workspace.localhost.pwn.college` (which resolve to 127.0.0.1).
 This is fine for development, but to serve your dojo to the world, you will need to update this (see Production Deployment).
 
+## Workspace startup flow
+
+Challenge containers now start asynchronously. The `/pwncollege_api/v1/docker` POST endpoint immediately returns a `job_id` and the UI loads `/workspace/job/<job_id>/<token>` on the workspace host. That route is served directly by the workspace nginx container, which queries Redis for job status through the lightweight `workspace_job_proxy` process. When the container is ready nginx responds with a `302` into the secure workspace URL; while the container is booting a static “starting…” page is returned that auto-refreshes without touching Flask/Gunicorn workers.
+
+- Redis keys live under `dojo:docker_job:*` by default. You can override the prefix with `DOCKER_JOB_PREFIX`.
+- Job metadata expires after 15 minutes; override with `DOCKER_JOB_TTL`.
+- The nginx job proxy refresh cadence defaults to 3 seconds and can be tuned via `WORKSPACE_JOB_REFRESH`.
+- The nginx and nginx-workspace containers need `REDIS_URL` so the proxy can resolve job state.
+
+If you use a custom reverse proxy, make sure requests for `/workspace/job/*` continue to the workspace nginx host; otherwise the browser will never be redirected into the running container.
+
 It will take some time to initialize everything and build the challenge docker image.
 You can check on your container (and the progress of the initial build) with:
 

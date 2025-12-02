@@ -34,10 +34,19 @@ FROM nginx:bookworm
 COPY --from=build /nginx/objs/ngx_http_acme_module.so /usr/lib/nginx/modules/
 COPY --from=build /nginx/objs/ngx_http_hmac_secure_link_module.so /usr/lib/nginx/modules/
 
-COPY nginx.conf /etc/nginx/nginx.conf
-COPY conf.d /etc/nginx/conf.d
-COPY templates /etc/nginx/templates
-COPY 00-dojo-env.sh /docker-entrypoint.d/00-dojo-env.sh
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
+COPY nginx/conf.d /etc/nginx/conf.d
+COPY nginx/templates /etc/nginx/templates
+COPY nginx/00-dojo-env.sh /docker-entrypoint.d/00-dojo-env.sh
+COPY workspace_job_proxy /opt/workspace_job_proxy
+RUN pip3 install --no-cache-dir -r /opt/workspace_job_proxy/requirements.txt
+COPY workspace_job_proxy/start-job-proxy.sh /docker-entrypoint.d/10-job-proxy.sh
+RUN chmod +x /docker-entrypoint.d/10-job-proxy.sh
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt
 
 VOLUME ["/var/cache/nginx/acme-letsencrypt"]
 

@@ -1,10 +1,16 @@
+import base64
 import datetime
 import hashlib
-import pathlib
+import hmac
+import json
 import logging
-import time
 import os
+import pathlib
 import re
+import secrets
+import threading
+import time
+import uuid
 
 import docker
 import docker.errors
@@ -18,7 +24,7 @@ from CTFd.utils.user import get_current_user, is_admin
 from CTFd.utils.decorators import authed_only
 from CTFd.exceptions import UserNotFoundException, UserTokenExpiredException
 
-from ...config import HOST_DATA_PATH, INTERNET_FOR_ALL, SECCOMP, USER_FIREWALL_ALLOWED
+from ...config import HOST_DATA_PATH, INTERNET_FOR_ALL, SECCOMP, USER_FIREWALL_ALLOWED, WORKSPACE_SECRET
 from ...models import DojoModules, DojoChallenges
 from ...utils import (
     container_name,
@@ -35,6 +41,7 @@ from ...utils.dojo import dojo_accessible, get_current_dojo_challenge
 from ...utils.workspace import exec_run
 from ...utils.feed import publish_container_start
 from ...utils.request_logging import get_trace_id, log_generator_output
+from ...pages.workspace import forward_port
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,110 @@ docker_namespace = Namespace(
 HOST_HOMES = pathlib.Path(HOST_DATA_PATH) / "workspace" / "homes"
 HOST_HOMES_MOUNTS = HOST_HOMES / "mounts"
 HOST_HOMES_OVERLAYS = HOST_HOMES / "overlays"
+
+JOB_REDIS_PREFIX = os.environ.get("DOCKER_JOB_PREFIX", "dojo:docker_job:")
+JOB_TTL_SECONDS = int(os.environ.get("DOCKER_JOB_TTL", "900"))
+DEFAULT_WORKSPACE_PORT = "80"
+
+
+def _job_meta_key(job_id):
+    return f"{JOB_REDIS_PREFIX}{job_id}"
+
+
+def _redis_client():
+    return redis.from_url(current_app.config["REDIS_URL"])
+
+
+def _load_job(job_id):
+    payload = _redis_client().get(_job_meta_key(job_id))
+    if not payload:
+        return None
+    return json.loads(payload)
+
+
+def _save_job(job):
+    job["updated_at"] = time.time()
+    _redis_client().set(
+        _job_meta_key(job["id"]),
+        json.dumps(job),
+        ex=JOB_TTL_SECONDS,
+    )
+    return job
+
+
+def _update_job(job_id, **updates):
+    job = _load_job(job_id)
+    if not job:
+        return None
+    job.update(updates)
+    return _save_job(job)
+
+
+def _workspace_job_url(job_id, token):
+    workspace_host = os.environ.get("WORKSPACE_HOST")
+    if not workspace_host:
+        return None
+    forwarded_proto = request.headers.get("X-Forwarded-Proto")
+    scheme = forwarded_proto or request.scheme
+    base = f"{scheme}://{workspace_host}"
+    return f"{base}/workspace/job/{job_id}/{token}"
+
+
+def _workspace_redirect(user, container, port=DEFAULT_WORKSPACE_PORT):
+    if not WORKSPACE_SECRET:
+        raise RuntimeError("WORKSPACE_SECRET is not configured")
+
+    container_id = container.id[:12]
+    message = container_id
+    node = user_node(user)
+    if node not in (None, 0):
+        message = f"{container_id}:192.168.42.{node + 1}"
+
+    digest = hmac.new(
+        WORKSPACE_SECRET.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).digest()
+    signature = base64.urlsafe_b64encode(digest).decode()
+    return forward_port(
+        port=port,
+        signature=signature,
+        message=message,
+        user=user,
+    )
+
+
+def _initialize_job(user, as_user, dojo_challenge, practice):
+    job_id = uuid.uuid4().hex
+    job_token = secrets.token_urlsafe(32)
+    now = time.time()
+    module = dojo_challenge.module
+    dojo = dojo_challenge.dojo
+    job = {
+        "id": job_id,
+        "token": job_token,
+        "user_id": user.id,
+        "user_name": user.name,
+        "as_user_id": as_user.id if as_user else None,
+        "as_user_name": (as_user.name if as_user else None),
+        "dojo_id": dojo.id,
+        "dojo_reference": dojo.reference_id,
+        "dojo_name": dojo.name,
+        "module_id": module.id if module else None,
+        "module_name": module.name if module else None,
+        "challenge_id": dojo_challenge.id,
+        "challenge_name": dojo_challenge.name,
+        "practice": bool(practice),
+        "state": "pending",
+        "workspace_url": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _save_job(job)
+    job_url = _workspace_job_url(job_id, job_token)
+    job["job_url"] = job_url
+    return job
 
 
 def remove_container(user):
@@ -261,6 +372,90 @@ def insert_flag(container, flag):
         ws.close()
 
 
+def _run_challenge_job(app, job_id, user_id, as_user_id, dojo_challenge_id, practice):
+    with app.app_context():
+        job = _update_job(job_id, state="running")
+        if not job:
+            logger.warning("Job %s disappeared before it could start", job_id)
+            return
+
+        user = Users.query.get(user_id)
+        as_user = Users.query.get(as_user_id) if as_user_id else None
+        dojo_challenge = DojoChallenges.query.get(dojo_challenge_id)
+
+        if not user or not dojo_challenge:
+            _update_job(
+                job_id,
+                state="error",
+                error="Workspace request is no longer valid.",
+                finished_at=time.time(),
+            )
+            return
+
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(
+                    "Async start job %s for user %s (attempt %s/%s)",
+                    job_id,
+                    user.id,
+                    attempt,
+                    max_attempts,
+                )
+                container = start_challenge(
+                    user,
+                    dojo_challenge,
+                    practice,
+                    as_user=as_user,
+                )
+
+                workspace_target = _workspace_redirect(as_user or user, container)
+                _update_job(
+                    job_id,
+                    state="ready",
+                    workspace_url=workspace_target,
+                    finished_at=time.time(),
+                )
+
+                dojo = dojo_challenge.dojo
+                if dojo.official or dojo.data.get("type") == "public":
+                    challenge_data = {
+                        "challenge_id": dojo_challenge.challenge_id,
+                        "challenge_name": dojo_challenge.name,
+                        "module_id": dojo_challenge.module.id
+                        if dojo_challenge.module
+                        else None,
+                        "module_name": dojo_challenge.module.name
+                        if dojo_challenge.module
+                        else None,
+                        "dojo_id": dojo.reference_id,
+                        "dojo_name": dojo.name,
+                    }
+                    mode = "practice" if practice else "assessment"
+                    actual_user = as_user or user
+                    publish_container_start(actual_user, mode, challenge_data)
+
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Attempt %s for job %s failed for user %s: %s",
+                    attempt,
+                    job_id,
+                    user.id,
+                    exc,
+                )
+                if attempt < max_attempts:
+                    time.sleep(2)
+
+        _update_job(
+            job_id,
+            state="error",
+            error="Workspace failed to start. Please retry.",
+            finished_at=time.time(),
+        )
+        logger.error("Docker failed for user %s (job %s)", user.id, job_id)
+
+
 def start_challenge(user, dojo_challenge, practice, *, as_user=None):
     docker_client = user_docker_client(user, image_name=dojo_challenge.image)
     node_id = user_node(user)
@@ -334,6 +529,8 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
             raise RuntimeError(f"DOJO_INIT_FAILED: {cause}")
     else:
         raise RuntimeError(f"Workspace failed to become ready.")
+
+    return container
 
 def docker_locked(func):
     def wrapper(*args, **kwargs):
@@ -483,36 +680,28 @@ class RunDocker(Resource):
                     return {"success": False, "error": f"Not an official student in this dojo ({as_user_id})"}
                 as_user = student.user
 
-        max_attempts = 3
-        for attempt in range(1, max_attempts+1):
-            try:
-                logger.info(f"Starting challenge for user {user.id} (attempt {attempt}/{max_attempts})...")
-                start_challenge(user, dojo_challenge, practice, as_user=as_user)
+        job = _initialize_job(user, as_user, dojo_challenge, practice)
+        app = current_app._get_current_object()
+        job_thread = threading.Thread(
+            target=_run_challenge_job,
+            args=(
+                app,
+                job["id"],
+                user.id,
+                as_user.id if as_user else None,
+                dojo_challenge.id,
+                practice,
+            ),
+            daemon=True,
+        )
+        job_thread.start()
 
-                if dojo.official or dojo.data.get("type") == "public":
-                    challenge_data = {
-                        "challenge_id": dojo_challenge.challenge_id,
-                        "challenge_name": dojo_challenge.name,
-                        "module_id": dojo_challenge.module.id if dojo_challenge.module else None,
-                        "module_name": dojo_challenge.module.name if dojo_challenge.module else None,
-                        "dojo_id": dojo.reference_id,
-                        "dojo_name": dojo.name
-                    }
-                    mode = "practice" if practice else "assessment"
-                    actual_user = as_user or user
-                    publish_container_start(actual_user, mode, challenge_data)
-
-                break
-            except Exception as e:
-                logger.warning(f"Attempt {attempt} failed for user {user.id} with error: {e}")
-                if attempt < max_attempts:
-                    logger.info(f"Retrying... ({attempt}/{max_attempts})")
-                    time.sleep(2)
+        response = {"success": True, "job_id": job["id"]}
+        if job.get("job_url"):
+            response["job_url"] = job["job_url"]
         else:
-            logger.error(f"ERROR: Docker failed for {user.id} after {max_attempts} attempts.")
-            return {"success": False, "error": "Docker failed"}
-
-        return {"success": True}
+            response["message"] = "Workspace queued"
+        return response
 
     @authed_only
     def get(self):

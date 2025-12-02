@@ -262,7 +262,14 @@ function actionStartChallenge(event) {
                 return;
             }
 
-            selectService(context(event).find("#workspace-select").prop("value"));
+            const iframe = $("#workspace-iframe");
+            const selectedService = context(event).find("#workspace-select").prop("value");
+            if (result.job_url && iframe.length) {
+                iframe.attr("src", result.job_url);
+            }
+            else {
+                selectService(selectedService);
+            }
             postStartChallenge(event, channel);
 
             context(event).find(".btn-challenge-start")

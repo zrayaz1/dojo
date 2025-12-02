@@ -264,7 +264,12 @@ function startChallenge(event) {
         $(".iframe-wrapper").html("");
         if (result.success) {
             item.find(".iframe-wrapper").html("<iframe id=\"workspace-iframe\" class=\"challenge-iframe\" src=\"\"></iframe>");
-            loadWorkspace();
+            const iframe = item.find("#workspace-iframe");
+            if (result.job_url) {
+                iframe.attr("src", result.job_url);
+            } else {
+                loadWorkspace();
+            }
             item.find(".challenge-init").addClass("challenge-hidden");
             item.find(".challenge-workspace").removeClass("challenge-hidden");
             item.find("#workspace-change-privilege")
