@@ -14,10 +14,10 @@ function submitChallenge(event) {
 
     if (submission == "pwn.college{practice}") {
         var message = "This is the practice flag! Find the real flag by pressing the Start button above to launch the challenge in unprivileged mode."
-        return renderSubmissionResponse({"data": {"status": "practice", "message": message}}, item);
+        return renderSubmissionResponse({ "data": { "status": "practice", "message": message } }, item);
     }
 
-    return CTFd.api.post_challenge_attempt({}, {"challenge_id": challenge_id, "submission": submission})
+    return CTFd.api.post_challenge_attempt({}, { "challenge_id": challenge_id, "submission": submission })
         .then(response => renderSubmissionResponse(response, item));
 };
 
@@ -54,7 +54,7 @@ function renderSubmissionResponse(response, item) {
 
         answer_input.removeClass("correct");
         answer_input.addClass("wrong");
-        setTimeout(function() {
+        setTimeout(function () {
             answer_input.removeClass("wrong");
         }, 10000);
     } else if (result.status === "practice") {
@@ -66,7 +66,7 @@ function renderSubmissionResponse(response, item) {
 
         answer_input.removeClass("correct");
         answer_input.addClass("wrong");
-        setTimeout(function() {
+        setTimeout(function () {
             answer_input.removeClass("wrong");
         }, 10000);
     } else if (result.status === "correct") {
@@ -78,7 +78,7 @@ function renderSubmissionResponse(response, item) {
 
         unsolved_flag.removeClass("challenge-unsolved");
         unsolved_flag.addClass("challenge-solved");
-        if(unsolved_flag.hasClass("far") && unsolved_flag.hasClass("fa-flag")) {
+        if (unsolved_flag.hasClass("far") && unsolved_flag.hasClass("fa-flag")) {
             unsolved_flag.removeClass("far")
             unsolved_flag.addClass("fas")
         }
@@ -104,11 +104,11 @@ function renderSubmissionResponse(response, item) {
                 'Content-Type': 'application/json'
             }
         }).then(function (response) {
-            if(response.status != 200) return Promise.reject()
+            if (response.status != 200) return Promise.reject()
             return response.json()
         }).then(function (data) {
-            if(data.type === "none") return
-            if(Math.random() > data.probability) return
+            if (data.type === "none") return
+            if (Math.random() > data.probability) return
             survey_notification.addClass(
                 "alert-warning alert-dismissable"
             );
@@ -116,8 +116,8 @@ function renderSubmissionResponse(response, item) {
         })
         unlockChallenge(next_challenge_button);
         checkUserAwards()
-        .then(handleAwardPopup)
-        .catch(error => console.error("Award check failed:", error));
+            .then(handleAwardPopup)
+            .catch(error => console.error("Award check failed:", error));
     } else if (result.status === "already_solved") {
         // Challenge already solved
         result_notification.addClass(
@@ -140,11 +140,11 @@ function renderSubmissionResponse(response, item) {
         result_notification.slideDown();
 
         answer_input.addClass("too-fast");
-        setTimeout(function() {
+        setTimeout(function () {
             answer_input.removeClass("too-fast");
         }, 10000);
     }
-    setTimeout(function() {
+    setTimeout(function () {
         item.find(".alert").slideUp();
         answer_input.prop("disabled", false);
     }, 10000);
@@ -203,7 +203,7 @@ function startChallenge(event) {
     var dot_counter = 0;
     setTimeout(function loadmsg() {
         if (result_message.html().startsWith("Loading")) {
-            if (dot_counter < dot_max - 1){
+            if (dot_counter < dot_max - 1) {
                 result_message.append(".");
                 dot_counter++;
             }
@@ -264,20 +264,24 @@ function startChallenge(event) {
         $(".iframe-wrapper").html("");
         if (result.success) {
             item.find(".iframe-wrapper").html("<iframe id=\"workspace-iframe\" class=\"challenge-iframe\" src=\"\"></iframe>");
-            loadWorkspace();
+            if (result.url) {
+                item.find("#workspace-iframe").attr("src", result.url);
+            } else {
+                loadWorkspace();
+            }
             item.find(".challenge-init").addClass("challenge-hidden");
             item.find(".challenge-workspace").removeClass("challenge-hidden");
             item.find("#workspace-change-privilege")
                 .attr("title", practice ? "Restart unprivileged" : "Restart privileged")
                 .attr("data-privileged", practice)
                 .find(".fas")
-                    .toggleClass("fa-lock", !practice)
-                    .toggleClass("fa-unlock", practice);
+                .toggleClass("fa-lock", !practice)
+                .toggleClass("fa-unlock", practice);
             windowResizeCallback("");
             moduleStartChallenge(event, channel);
         }
 
-        setTimeout(function() {
+        setTimeout(function () {
             item.find(".alert").slideUp();
         }, 60000);
     }).catch(function (error) {
@@ -290,13 +294,13 @@ function startChallenge(event) {
 
 async function buildSurvey(item) {
     const form = item.find("form#survey-notification")
-    if(form.html() === "") return
+    if (form.html() === "") return
 
     // fix styles
     const challenge_id = item.find('#challenge-id').val()
-    for(const style of form.find("style")) {
+    for (const style of form.find("style")) {
         let cssText = ""
-        for(const rule of style.sheet.cssRules) {
+        for (const rule of style.sheet.cssRules) {
             cssText += ".survey-id-" + challenge_id + " " + rule.cssText + " "
         }
         style.innerHTML = cssText
@@ -421,10 +425,10 @@ $(() => {
                 var priv = $(item).find("#workspace-change-privilege");
                 if (priv.length > 0) {
                     priv.attr("data-privileged", event.data["challenge-privilege"]);
-                    displayPrivileged({"target": priv[0]}, false);
+                    displayPrivileged({ "target": priv[0] }, false);
                 }
 
-                selectService($(item).find("#workspace-select").prop("value"), log=false);
+                selectService($(item).find("#workspace-select").prop("value"), log = false);
             }
         })
     });

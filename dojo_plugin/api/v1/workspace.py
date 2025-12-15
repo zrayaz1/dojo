@@ -9,7 +9,7 @@ from CTFd.models import Users
 from CTFd.utils.user import get_current_user, is_admin
 from CTFd.utils.decorators import authed_only
 
-from ...utils import get_current_container, container_password, user_node
+from ...utils import get_current_container, container_password, user_node, generate_workspace_signature
 from ...utils.workspace import start_on_demand_service, reset_home
 from ...pages.workspace import forward_workspace, forward_port
 from ...config import WORKSPACE_SECRET
@@ -59,14 +59,9 @@ class view_desktop(Resource):
         node = user_node(user)
         if not node == None and not node == 0:
             message = f"{container_id}:192.168.42.{node + 1}"
-
-        digest = hmac.new(
-            WORKSPACE_SECRET.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).digest()
-
-        signature = base64.urlsafe_b64encode(digest).decode()
+            signature = generate_workspace_signature(container_id, f"192.168.42.{node + 1}")
+        else:
+            signature = generate_workspace_signature(container_id)
 
         if service:
             if service == "desktop":

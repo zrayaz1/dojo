@@ -64,3 +64,26 @@ def reset_home(user_id):
     exec_run("find /home/hacker -mindepth 1 -delete", user_id=user_id, shell=True, workspace_user="root")
     exec_run("chown hacker:hacker /home/hacker", user_id=user_id, shell=True, workspace_user="root")
     exec_run("cp /tmp/home-backup.tar.gz /home/hacker/", user_id=user_id, shell=True, workspace_user="hacker")
+
+
+def generate_workspace_signature(container_id, service_id=None):
+    from ..config import WORKSPACE_SECRET
+    import hmac
+    import hashlib
+    import base64
+
+    if not WORKSPACE_SECRET:
+        raise RuntimeError("WORKSPACE_SECRET not set")
+
+    message = container_id
+    if service_id:
+        message = f"{container_id}:{service_id}"
+
+    digest = hmac.new(
+        WORKSPACE_SECRET.encode(),
+        message.encode(),
+        hashlib.sha256
+    ).digest()
+
+    signature = base64.urlsafe_b64encode(digest).decode()
+    return signature

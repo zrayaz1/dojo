@@ -10,8 +10,9 @@ import docker
 import docker.errors
 import docker.types
 import redis
-from flask import abort, request, current_app
+from flask import abort, request, current_app, copy_current_request_context
 from flask_restx import Namespace, Resource
+import threading
 from CTFd.cache import cache
 from CTFd.models import Users, Solves
 from CTFd.utils.user import get_current_user, is_admin
@@ -34,7 +35,23 @@ from ...utils import (
 from ...utils.dojo import dojo_accessible, get_current_dojo_challenge
 from ...utils.workspace import exec_run
 from ...utils.feed import publish_container_start
+from ...utils import (
+    container_name,
+    lookup_workspace_token,
+    resolved_tar,
+    serialize_user_flag,
+    user_docker_client,
+    user_node,
+    user_ipv4,
+    get_current_container,
+    is_challenge_locked,
+    generate_workspace_signature,
+)
+from ...utils.dojo import dojo_accessible, get_current_dojo_challenge
+from ...utils.workspace import exec_run
+from ...utils.feed import publish_container_start
 from ...utils.request_logging import get_trace_id, log_generator_output
+from ...pages.workspace import forward_port
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +229,57 @@ def start_container(docker_client, user, as_user, user_mounts, dojo_challenge, p
         raise RuntimeError(f"Workspace failed to initialize after {time.time()-start_time:.1f} seconds.")
 
     cache.set(f"user_{user.id}-running-image", resolved_dojo_challenge.image, timeout=0)
+
+    # Start the polling service
+    exec_run(
+        """
+        /usr/bin/python3 -c '
+import http.server
+import socketserver
+import sys
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            if self.ready:
+                self.send_response(302)
+                self.send_header("Location", "../80/")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html><head><meta http-equiv=\\"refresh\\" content=\\"1\\"></head><body>Loading...</body></html>")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/ready":
+            self.ready = True
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    @property
+    def ready(self):
+        return getattr(self.server, "ready", False)
+
+    @ready.setter
+    def ready(self, value):
+        self.server.ready = value
+
+with socketserver.TCPServer(("", 1111), Handler) as httpd:
+    httpd.serve_forever()
+        ' &
+        """,
+        container=container,
+        shell=True,
+        workspace_user="root"
+    )
+
     return container
 
 
@@ -261,6 +329,42 @@ def insert_flag(container, flag):
         ws.close()
 
 
+def setup_challenge(user, dojo_challenge, practice, as_user=None):
+    try:
+        docker_client = user_docker_client(user, image_name=dojo_challenge.image)
+        container = docker_client.containers.get(container_name(user))
+        start_time = time.time()
+
+        if dojo_challenge.path.exists():
+            insert_challenge(container, as_user, dojo_challenge)
+
+        if practice:
+            flag = "practice"
+        elif as_user != user:
+            flag = "support_flag"
+        else:
+            flag = serialize_user_flag(as_user.id, dojo_challenge.challenge_id)
+        insert_flag(container, flag)
+
+        for message in log_generator_output(
+            "workspace readying ", container.logs(stream=True, follow=True), start_time=start_time
+        ):
+            if b"DOJO_INIT_READY" in message or message == b"Ready.\n":
+                logger.info(f"workspace ready after {time.time()-start_time:.1f} seconds")
+                break
+            if b"DOJO_INIT_FAILED:" in message:
+                cause = message.split(b"DOJO_INIT_FAILED:")[1].split(b"\n")[0]
+                raise RuntimeError(f"DOJO_INIT_FAILED: {cause}")
+        else:
+            raise RuntimeError(f"Workspace failed to become ready.")
+
+        # Notify the polling service
+        exec_run("curl http://localhost:1111/ready -X POST", container=container, workspace_user="root")
+
+    except Exception as e:
+        logger.exception(f"Failed to setup challenge for user {user.id}: {e}")
+
+
 def start_challenge(user, dojo_challenge, practice, *, as_user=None):
     docker_client = user_docker_client(user, image_name=dojo_challenge.image)
     node_id = user_node(user)
@@ -302,7 +406,6 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
 
     as_user = as_user or user
 
-    start_time = time.time()
     container = start_container(
         docker_client=docker_client,
         user=user,
@@ -312,28 +415,7 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
         practice=practice,
     )
 
-    if dojo_challenge.path.exists():
-        insert_challenge(container, as_user, dojo_challenge)
-
-    if practice:
-        flag = "practice"
-    elif as_user != user:
-        flag = "support_flag"
-    else:
-        flag = serialize_user_flag(as_user.id, dojo_challenge.challenge_id)
-    insert_flag(container, flag)
-
-    for message in log_generator_output(
-        "workspace readying ", container.logs(stream=True, follow=True), start_time=start_time
-    ):
-        if b"DOJO_INIT_READY" in message or message == b"Ready.\n":
-            logger.info(f"workspace ready after {time.time()-start_time:.1f} seconds")
-            break
-        if b"DOJO_INIT_FAILED:" in message:
-            cause = message.split(b"DOJO_INIT_FAILED:")[1].split(b"\n")[0]
-            raise RuntimeError(f"DOJO_INIT_FAILED: {cause}")
-    else:
-        raise RuntimeError(f"Workspace failed to become ready.")
+    return container
 
 def docker_locked(func):
     def wrapper(*args, **kwargs):
@@ -487,22 +569,45 @@ class RunDocker(Resource):
         for attempt in range(1, max_attempts+1):
             try:
                 logger.info(f"Starting challenge for user {user.id} (attempt {attempt}/{max_attempts})...")
-                start_challenge(user, dojo_challenge, practice, as_user=as_user)
+                container = start_challenge(user, dojo_challenge, practice, as_user=as_user)
 
-                if dojo.official or dojo.data.get("type") == "public":
-                    challenge_data = {
-                        "challenge_id": dojo_challenge.challenge_id,
-                        "challenge_name": dojo_challenge.name,
-                        "module_id": dojo_challenge.module.id if dojo_challenge.module else None,
-                        "module_name": dojo_challenge.module.name if dojo_challenge.module else None,
-                        "dojo_id": dojo.reference_id,
-                        "dojo_name": dojo.name
-                    }
-                    mode = "practice" if practice else "assessment"
-                    actual_user = as_user or user
-                    publish_container_start(actual_user, mode, challenge_data)
+                @copy_current_request_context
+                def background_setup():
+                    setup_challenge(user, dojo_challenge, practice, as_user=as_user)
+                    if dojo.official or dojo.data.get("type") == "public":
+                        challenge_data = {
+                            "challenge_id": dojo_challenge.challenge_id,
+                            "challenge_name": dojo_challenge.name,
+                            "module_id": dojo_challenge.module.id if dojo_challenge.module else None,
+                            "module_name": dojo_challenge.module.name if dojo_challenge.module else None,
+                            "dojo_id": dojo.reference_id,
+                            "dojo_name": dojo.name
+                        }
+                        mode = "practice" if practice else "assessment"
+                        actual_user = as_user or user
+                        publish_container_start(actual_user, mode, challenge_data)
 
-                break
+                threading.Thread(target=background_setup).start()
+
+                container_id = container.id[:12]
+                node = user_node(user)
+                if not node == None and not node == 0:
+                    signature = generate_workspace_signature(container_id, f"192.168.42.{node + 1}")
+                    message = f"{container_id}:192.168.42.{node + 1}"
+                else:
+                    signature = generate_workspace_signature(container_id)
+                    message = container_id
+
+                url = forward_port(
+                    port=1111,
+                    signature=signature,
+                    message=message,
+                    user=user,
+                    service_path=""
+                )
+
+                return {"success": True, "url": url}
+
             except Exception as e:
                 logger.warning(f"Attempt {attempt} failed for user {user.id} with error: {e}")
                 if attempt < max_attempts:
@@ -511,8 +616,6 @@ class RunDocker(Resource):
         else:
             logger.error(f"ERROR: Docker failed for {user.id} after {max_attempts} attempts.")
             return {"success": False, "error": "Docker failed"}
-
-        return {"success": True}
 
     @authed_only
     def get(self):
