@@ -1,16 +1,18 @@
 import datetime
+import time
 import hashlib
 import pathlib
 import logging
 import time
 import os
 import re
+import threading
 
 import docker
 import docker.errors
 import docker.types
 import redis
-from flask import abort, request, current_app
+from flask import abort, request, current_app, copy_current_request_context
 from flask_restx import Namespace, Resource
 from CTFd.cache import cache
 from CTFd.models import Users, Solves
@@ -221,7 +223,6 @@ def insert_challenge(container, as_user, dojo_challenge):
         return path.name.startswith("_") and path.is_dir()
 
     exec_run("/run/dojo/bin/mkdir -p /challenge", container=container)
-
     root_dir = dojo_challenge.path.parent.parent
     challenge_tar = resolved_tar(
         dojo_challenge.path,
@@ -302,7 +303,7 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
 
     as_user = as_user or user
 
-    start_time = time.time()
+    # start_time = time.time()
     container = start_container(
         docker_client=docker_client,
         user=user,
@@ -311,7 +312,19 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
         dojo_challenge=dojo_challenge,
         practice=practice,
     )
+    return container 
 
+def setup_challenge(
+        user_id, dojo_id, module_index, 
+        challenge_index,practice, as_user_id=None,):
+    start_time = time.time()
+    user = Users.query.get(user_id)
+    dojo_challenge = DojoChallenges.query.get((dojo_id, module_index, challenge_index))
+    as_user = Users.query.get(as_user_id) if as_user_id else user
+
+    docker_client = user_docker_client(user, image_name=dojo_challenge.image)
+    container = docker_client.containers.get(container_name(user))
+    # time.sleep(3)
     if dojo_challenge.path.exists():
         insert_challenge(container, as_user, dojo_challenge)
 
@@ -487,22 +500,34 @@ class RunDocker(Resource):
         for attempt in range(1, max_attempts+1):
             try:
                 logger.info(f"Starting challenge for user {user.id} (attempt {attempt}/{max_attempts})...")
-                start_challenge(user, dojo_challenge, practice, as_user=as_user)
+                container = start_challenge(user, dojo_challenge, practice, as_user=as_user) 
 
-                if dojo.official or dojo.data.get("type") == "public":
-                    challenge_data = {
-                        "challenge_id": dojo_challenge.challenge_id,
-                        "challenge_name": dojo_challenge.name,
-                        "module_id": dojo_challenge.module.id if dojo_challenge.module else None,
-                        "module_name": dojo_challenge.module.name if dojo_challenge.module else None,
-                        "dojo_id": dojo.reference_id,
-                        "dojo_name": dojo.name
-                    }
-                    mode = "practice" if practice else "assessment"
-                    actual_user = as_user or user
-                    publish_container_start(actual_user, mode, challenge_data)
+                @copy_current_request_context
+                def background_setup(user_id, dojo_id, module_index, challenge_index, practice, as_user_id, dojo_reference_id):
+                    setup_challenge(user_id, dojo_id, module_index, challenge_index, practice, as_user_id)
 
-                break
+                    user = Users.query.get(user_id)
+                    dojo_challenge = DojoChallenges.query.get((dojo_id, module_index, challenge_index))
+                    as_user = Users.query.get(as_user_id) if as_user_id else user
+                    dojo = Dojos.query.filter_by(reference_id=dojo_reference_id).first()
+
+                    if dojo and (dojo.official or dojo.data.get("type") == "public"):
+                        challenge_data = {
+                            "challenge_id": dojo_challenge.challenge_id,
+                            "challenge_name": dojo_challenge.name,
+                            "module_id": dojo_challenge.module.id if dojo_challenge.module else None,
+                            "module_name": dojo_challenge.module.name if dojo_challenge.module else None,
+                            "dojo_id": dojo.reference_id,
+                            "dojo_name": dojo.name
+                        }
+                        mode = "practice" if practice else "assessment"
+                        publish_container_start(as_user, mode, challenge_data)
+
+
+                threading.Thread(target=background_setup, args=(user.id, dojo_challenge.dojo_id, dojo_challenge.module_index, dojo_challenge.challenge_index, practice, as_user.id if as_user else None, dojo.reference_id)).start()
+                return {"success": True}
+
+
             except Exception as e:
                 logger.warning(f"Attempt {attempt} failed for user {user.id} with error: {e}")
                 if attempt < max_attempts:
@@ -511,8 +536,6 @@ class RunDocker(Resource):
         else:
             logger.error(f"ERROR: Docker failed for {user.id} after {max_attempts} attempts.")
             return {"success": False, "error": "Docker failed"}
-
-        return {"success": True}
 
     @authed_only
     def get(self):
@@ -549,3 +572,4 @@ class RunDocker(Resource):
         except Exception as e:
             logger.error(f"Failed to terminate container for user {user.id}: {e}")
             return {"success": False, "error": "Failed to terminate container"}
+
